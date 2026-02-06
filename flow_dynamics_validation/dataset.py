@@ -204,6 +204,53 @@ def collect_neighborhood_samples(dataset, eval_batch, k_neighbors=50, seed=42):
     return empirical_next_obs
 
 
+def precompute_knn_std(dataset, k=50, chunk_size=1000):
+    """Precompute per-datapoint KNN empirical std of next_observations.
+
+    For every transition i in the dataset, finds its k nearest neighbours
+    in (s, a)-space and stores std(next_obs[neighbours]) as the target
+    conditional spread.  This table is used by the variance-matching loss
+    during training.
+
+    Args:
+        dataset: Normalised dataset dictionary.
+        k: Number of nearest neighbours.
+        chunk_size: Number of query points to process at once (controls memory).
+
+    Returns:
+        knn_std: Array of shape (N, obs_dim) with per-point KNN std.
+    """
+    obs = dataset["observations"]
+    act = dataset["actions"]
+    next_obs = dataset["next_observations"]
+
+    sa = np.concatenate([obs, act], axis=-1)  # (N, D)
+    N = len(sa)
+    obs_dim = next_obs.shape[1]
+
+    sq_norms = np.sum(sa ** 2, axis=1)  # (N,)
+    knn_std = np.zeros((N, obs_dim), dtype=np.float32)
+
+    print(f"  Precomputing KNN std (N={N}, k={k}) ...")
+    for start in range(0, N, chunk_size):
+        end = min(start + chunk_size, N)
+        chunk = sa[start:end]  # (C, D)
+
+        # Squared distances: (C, N) via ||a-b||^2 = ||a||^2 + ||b||^2 - 2 a.b
+        chunk_sq_norms = np.sum(chunk ** 2, axis=1, keepdims=True)  # (C, 1)
+        dists_sq = chunk_sq_norms + sq_norms[np.newaxis, :] - 2 * (chunk @ sa.T)
+
+        # k+1 because self is included (dist=0)
+        nn_indices = np.argpartition(dists_sq, k + 1, axis=1)[:, : k + 1]  # (C, k+1)
+        nn_next_obs = next_obs[nn_indices]  # (C, k+1, obs_dim)
+        knn_std[start:end] = np.std(nn_next_obs, axis=1)  # (C, obs_dim)
+
+        if (end // chunk_size) % 10 == 0 or end == N:
+            print(f"    ... {end}/{N}")
+
+    return knn_std
+
+
 if __name__ == "__main__":
     # Quick test
     dataset = load_dataset("hopper-medium-v2", data_dir="data")

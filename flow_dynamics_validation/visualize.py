@@ -324,8 +324,93 @@ def plot_global_comparison(global_results, save_dir="plots",
     print(f"Saved global comparison plot to {filepath}")
 
 
+def plot_std_ratio_trends(history, save_dir="plots",
+                          filename="std_ratio_trends.png"):
+    """Plot std_ratio evolution during training (per-dim + median).
+
+    Args:
+        history: Training history dict with 'std_ratio_epochs',
+            'std_ratio_per_dim', 'std_ratio_median'.
+        save_dir: Directory to save the plot.
+        filename: Filename for the plot.
+    """
+    epochs = history.get("std_ratio_epochs", [])
+    per_dim = history.get("std_ratio_per_dim", [])
+    medians = history.get("std_ratio_median", [])
+    if not epochs:
+        return  # nothing to plot
+
+    os.makedirs(save_dir, exist_ok=True)
+    per_dim = np.array(per_dim)  # (num_evals, obs_dim)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+    # Left: median std_ratio over training
+    ax1.plot(epochs, medians, "o-", color="#E91E63", linewidth=2, markersize=4)
+    ax1.axhline(1.0, color="grey", linestyle="--", alpha=0.6, label="ideal = 1.0")
+    ax1.set_xlabel("Epoch", fontsize=12)
+    ax1.set_ylabel("Median std_ratio (flow / empirical)", fontsize=12)
+    ax1.set_title("Median Conditional Std Ratio During Training", fontsize=13)
+    ax1.legend(fontsize=11)
+    ax1.grid(alpha=0.3)
+
+    # Right: per-dim std_ratio over training
+    obs_dim = per_dim.shape[1]
+    cmap = plt.cm.viridis(np.linspace(0, 1, obs_dim))
+    for d in range(obs_dim):
+        ax2.plot(epochs, per_dim[:, d], "-", color=cmap[d], alpha=0.7,
+                 label=f"d{d}")
+    ax2.axhline(1.0, color="grey", linestyle="--", alpha=0.6)
+    ax2.set_xlabel("Epoch", fontsize=12)
+    ax2.set_ylabel("std_ratio per dim", fontsize=12)
+    ax2.set_title("Per-Dimension Conditional Std Ratio", fontsize=13)
+    if obs_dim <= 12:
+        ax2.legend(fontsize=8, ncol=2)
+    ax2.grid(alpha=0.3)
+
+    plt.tight_layout()
+    filepath = os.path.join(save_dir, filename)
+    plt.savefig(filepath, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved std_ratio trend plot to {filepath}")
+
+
+def plot_training_losses(history, save_dir="plots",
+                         filename="training_losses.png"):
+    """Plot base loss, std loss, and total loss curves.
+
+    Args:
+        history: Training history dict with 'losses', 'base_losses',
+            'std_losses'.
+        save_dir: Directory to save the plot.
+        filename: Filename for the plot.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    epochs = range(1, len(history["losses"]) + 1)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(epochs, history["losses"], label="total", color="#009688", linewidth=1.5)
+    ax.plot(epochs, history["base_losses"], label="base (CFM)",
+            color="#2196F3", linewidth=1, alpha=0.8)
+    if any(v > 0 for v in history["std_losses"]):
+        ax.plot(epochs, history["std_losses"], label="std (variance)",
+                color="#FF5722", linewidth=1, alpha=0.8)
+    ax.set_xlabel("Epoch", fontsize=12)
+    ax.set_ylabel("Loss", fontsize=12)
+    ax.set_title("Training Loss Curves", fontsize=14)
+    ax.set_yscale("log")
+    ax.legend(fontsize=11)
+    ax.grid(alpha=0.3)
+
+    plt.tight_layout()
+    filepath = os.path.join(save_dir, filename)
+    plt.savefig(filepath, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved training losses plot to {filepath}")
+
+
 def generate_all_plots(pointwise_results, neighbor_results, global_results,
-                       empirical_samples, flow_samples, losses,
+                       empirical_samples, flow_samples, history,
                        dataset_next_obs, flow_global_samples,
                        save_dir="plots"):
     """Generate all validation plots.
@@ -336,12 +421,18 @@ def generate_all_plots(pointwise_results, neighbor_results, global_results,
         global_results: From compare_global_statistics.
         empirical_samples: shape (num_pairs, k, obs_dim).
         flow_samples: shape (num_pairs, num_samples, obs_dim).
-        losses: Training loss history.
+        history: Training history dict (from train_flow_model).
         dataset_next_obs: All dataset s' for global histograms.
         flow_global_samples: Flow samples for global histograms (flat).
         save_dir: Directory to save plots.
     """
+    # Training curves
+    losses = history["losses"]
     plot_training_loss(losses, save_dir)
+    plot_training_losses(history, save_dir)
+
+    # Std ratio trends (if available)
+    plot_std_ratio_trends(history, save_dir)
 
     # Pointwise
     plot_pointwise_prediction(pointwise_results, save_dir)

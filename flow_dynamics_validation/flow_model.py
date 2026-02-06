@@ -172,6 +172,118 @@ def flow_matching_loss(params, apply_fn, batch, rng):
     return loss
 
 
+def variance_matching_loss(params, apply_fn, obs, act, knn_std,
+                           rng, num_samples=64, num_ode_steps=20):
+    """Compute the variance / moment-matching loss.
+
+    For each (s, a) in the mini-batch:
+      1. Draw M noise vectors  x_0^{(m)} ~ N(0, I)
+      2. Integrate each through the learned ODE to get s'^{(m)}
+      3. Compute  std_model = std_over_m( s'^{(m)} )   per dimension
+      4. Compare with the precomputed KNN empirical std:
+             L = mean_over_batch( | log(std_model + eps) - log(std_emp + eps) |_1 )
+
+    Because `jax.lax.scan` is differentiable, gradients flow through
+    the ODE integration back into the velocity-field parameters.
+
+    Args:
+        params: Model parameters (traced by jax.grad).
+        apply_fn: Model apply function (closed over, not traced).
+        obs: Observations of shape (B, obs_dim).
+        act: Actions of shape (B, act_dim).
+        knn_std: Precomputed empirical KNN std, shape (B, obs_dim).
+        rng: JAX PRNG key.
+        num_samples: M – number of ODE samples per (s, a).
+        num_ode_steps: Integration steps for the inner ODE.
+
+    Returns:
+        Scalar loss.
+    """
+    B = obs.shape[0]
+    obs_dim = obs.shape[1]
+    dt = 1.0 / num_ode_steps
+
+    condition = jnp.concatenate([obs, act], axis=-1)  # (B, cond_dim)
+
+    # Expand condition for M samples:  (B, cond) -> (B*M, cond)
+    cond_expanded = jnp.repeat(condition, num_samples, axis=0)   # (B*M, cond_dim)
+
+    # Initial noise: (B*M, obs_dim)
+    noise = jax.random.normal(rng, (B * num_samples, obs_dim))
+
+    # ---- ODE integration (differentiable via scan) ----
+    def step_fn(x, step_idx):
+        t = jnp.full((x.shape[0], 1), step_idx * dt)
+        v = apply_fn({"params": params}, x, t, cond_expanded)
+        return x + v * dt, None
+
+    x_final, _ = jax.lax.scan(step_fn, noise, jnp.arange(num_ode_steps))
+    # x_final: (B*M, obs_dim)
+
+    # Reshape -> (B, M, obs_dim)
+    samples = x_final.reshape(B, num_samples, obs_dim)
+
+    # Per (s,a) per-dim std of model samples
+    std_model = jnp.std(samples, axis=1)  # (B, obs_dim)
+
+    # Log-space L1 loss
+    eps = 1e-6
+    loss = jnp.mean(jnp.abs(
+        jnp.log(std_model + eps) - jnp.log(knn_std + eps)
+    ))
+
+    return loss
+
+
+def combined_loss(params, apply_fn, batch, knn_std_batch, rng,
+                  w_std=0.0, std_batch_size=16,
+                  num_model_samples=64, num_ode_steps_std=20):
+    """Base CFM loss + optional variance-matching loss.
+
+    Args:
+        params: Model parameters.
+        apply_fn: Model apply function.
+        batch: Dict with 'observations', 'actions', 'next_observations'.
+        knn_std_batch: Precomputed KNN std for this batch, (B, obs_dim).
+        rng: JAX PRNG key.
+        w_std: Weight on the variance-matching term. 0 disables it.
+        std_batch_size: How many items from the batch to use for the
+            (expensive) variance-matching term.
+        num_model_samples: M – ODE samples per query for variance loss.
+        num_ode_steps_std: Integration steps for the variance ODE.
+
+    Returns:
+        (total_loss, info_dict)
+    """
+    rng_base, rng_std = jax.random.split(rng)
+
+    base_loss = flow_matching_loss(params, apply_fn, batch, rng_base)
+
+    if w_std <= 0.0:
+        return base_loss, {
+            "base_loss": base_loss,
+            "std_loss": jnp.float32(0.0),
+            "total_loss": base_loss,
+        }
+
+    # Sub-sample the batch for the expensive variance term
+    obs_sub = batch["observations"][:std_batch_size]
+    act_sub = batch["actions"][:std_batch_size]
+    knn_sub = knn_std_batch[:std_batch_size]
+
+    std_loss = variance_matching_loss(
+        params, apply_fn, obs_sub, act_sub, knn_sub,
+        rng_std, num_model_samples, num_ode_steps_std,
+    )
+
+    total_loss = base_loss + w_std * std_loss
+    return total_loss, {
+        "base_loss": base_loss,
+        "std_loss": std_loss,
+        "total_loss": total_loss,
+    }
+
+
 if __name__ == "__main__":
     # Quick test
     rng = jax.random.PRNGKey(0)

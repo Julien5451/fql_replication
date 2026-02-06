@@ -207,5 +207,11 @@ if __name__ == "__main__":
     emp = rng.randn(num_pairs, k, obs_dim).astype(np.float32)
     flow = emp + 0.1 * rng.randn(num_pairs, k, obs_dim).astype(np.float32)
 
-    results = compare_statistics(emp, flow)
-    print_comparison_report(results)
+    true_next = rng.randn(num_pairs, obs_dim).astype(np.float32)
+    ds_next = rng.randn(100, obs_dim).astype(np.float32)
+    flow_flat = rng.randn(80, obs_dim).astype(np.float32)
+
+    pw = compute_pointwise_accuracy(true_next, flow)
+    nb = compare_statistics(emp, flow)
+    gl = compare_global_statistics(ds_next, flow_flat)
+    print_comparison_report(pw, nb, gl)
