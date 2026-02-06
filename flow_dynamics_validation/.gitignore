@@ -1,0 +1,6 @@
+# Downloaded datasets (large HDF5 files)
+data/
+
+# Python cache
+__pycache__/
+*.pyc

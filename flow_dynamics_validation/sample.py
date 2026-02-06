@@ -55,30 +55,30 @@ def euler_sample(model, params, observations, actions, rng,
     return samples
 
 
-@jax.jit
-def _euler_sample_single(params, apply_fn, condition, x_0, num_steps):
-    """JIT-compiled Euler integration for a single noise sample.
+def _make_euler_sampler(apply_fn, num_steps):
+    """Create a JIT-compiled Euler sampler with the model apply_fn closed over.
 
     Args:
-        params: Model parameters.
         apply_fn: Model apply function.
-        condition: Concatenated (s, a) of shape (B, cond_dim).
-        x_0: Initial noise of shape (B, obs_dim).
         num_steps: Number of integration steps.
 
     Returns:
-        Final samples of shape (B, obs_dim).
+        JIT-compiled function (params, condition, x_0) -> x_final.
     """
     dt = 1.0 / num_steps
 
-    def step_fn(x, step_idx):
-        t = jnp.full((x.shape[0], 1), step_idx * dt)
-        v = apply_fn({"params": params}, x, t, condition)
-        x_new = x + v * dt
-        return x_new, None
+    @jax.jit
+    def euler_integrate(params, condition, x_0):
+        def step_fn(x, step_idx):
+            t = jnp.full((x.shape[0], 1), step_idx * dt)
+            v = apply_fn({"params": params}, x, t, condition)
+            x_new = x + v * dt
+            return x_new, None
 
-    x_final, _ = jax.lax.scan(step_fn, x_0, jnp.arange(num_steps))
-    return x_final
+        x_final, _ = jax.lax.scan(step_fn, x_0, jnp.arange(num_steps))
+        return x_final
+
+    return euler_integrate
 
 
 def euler_sample_fast(model, params, observations, actions, rng,
@@ -101,12 +101,13 @@ def euler_sample_fast(model, params, observations, actions, rng,
     obs_dim = observations.shape[1]
 
     condition = jnp.concatenate([observations, actions], axis=-1)
+    euler_fn = _make_euler_sampler(model.apply, num_steps)
 
     all_samples = []
     for k in range(num_samples):
         rng, noise_rng = jax.random.split(rng)
         x_0 = jax.random.normal(noise_rng, (batch_size, obs_dim))
-        x_final = _euler_sample_single(params, model.apply, condition, x_0, num_steps)
+        x_final = euler_fn(params, condition, x_0)
         all_samples.append(x_final)
 
     samples = jnp.stack(all_samples, axis=1)

@@ -47,25 +47,23 @@ def create_train_state(rng, obs_dim, act_dim, learning_rate=3e-4,
     return model, params, opt_state, optimizer
 
 
-@jax.jit
-def train_step(params, opt_state, batch, rng, apply_fn, optimizer):
-    """Single training step.
+def make_train_step(apply_fn, optimizer):
+    """Create a JIT-compiled training step function.
 
     Args:
-        params: Model parameters.
-        opt_state: Optimizer state.
-        batch: Training batch.
-        rng: Random key.
-        apply_fn: Model apply function.
-        optimizer: Optax optimizer.
+        apply_fn: Model apply function (closed over, not traced).
+        optimizer: Optax optimizer (closed over, not traced).
 
     Returns:
-        Updated (params, opt_state, loss).
+        JIT-compiled train_step function.
     """
-    loss, grads = jax.value_and_grad(flow_matching_loss)(params, apply_fn, batch, rng)
-    updates, new_opt_state = optimizer.update(grads, opt_state, params)
-    new_params = optax.apply_updates(params, updates)
-    return new_params, new_opt_state, loss
+    @jax.jit
+    def train_step(params, opt_state, batch, rng):
+        loss, grads = jax.value_and_grad(flow_matching_loss)(params, apply_fn, batch, rng)
+        updates, new_opt_state = optimizer.update(grads, opt_state, params)
+        new_params = optax.apply_updates(params, updates)
+        return new_params, new_opt_state, loss
+    return train_step
 
 
 def train_flow_model(dataset, num_epochs=100, batch_size=256, learning_rate=3e-4,
@@ -103,6 +101,9 @@ def train_flow_model(dataset, num_epochs=100, batch_size=256, learning_rate=3e-4
         init_rng, obs_dim, act_dim, learning_rate, hidden_dims, time_embed_dim, layer_norm
     )
 
+    # Create JIT-compiled train step
+    train_step = make_train_step(model.apply, optimizer)
+
     # Precompute number of batches per epoch
     num_batches = max(n // batch_size, 1)
     losses = []
@@ -133,9 +134,7 @@ def train_flow_model(dataset, num_epochs=100, batch_size=256, learning_rate=3e-4
             }
 
             rng, step_rng = jax.random.split(rng)
-            params, opt_state, loss = train_step(
-                params, opt_state, batch, step_rng, model.apply, optimizer
-            )
+            params, opt_state, loss = train_step(params, opt_state, batch, step_rng)
             epoch_losses.append(float(loss))
 
         avg_loss = np.mean(epoch_losses)

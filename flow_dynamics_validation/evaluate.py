@@ -1,8 +1,11 @@
 """Statistical comparison between empirical and flow model samples.
 
-Computes per-dimension mean and standard deviation for both the empirical
-dataset distribution and the flow model's sampled distribution, then
-quantifies the agreement.
+Provides three levels of comparison:
+1. Pointwise prediction: Is the flow model's mean prediction close to the true s'?
+2. Neighborhood (conditional): Does the flow model's conditional distribution
+   match the KNN-based empirical distribution?
+3. Global (marginal): Does the overall distribution of flow-generated s'
+   match the marginal distribution of s' in the dataset?
 """
 
 import numpy as np
@@ -20,6 +23,38 @@ def compute_statistics(samples):
     return {
         "mean": np.mean(samples, axis=-2),
         "std": np.std(samples, axis=-2),
+    }
+
+
+def compute_pointwise_accuracy(true_next_obs, flow_samples):
+    """Compute pointwise prediction accuracy.
+
+    For each (s, a, s') triple, check if the flow model's mean prediction
+    (averaged over samples) is close to the true s'. This is the most
+    meaningful metric for near-deterministic transitions.
+
+    Args:
+        true_next_obs: Ground-truth s' of shape (num_pairs, obs_dim).
+        flow_samples: Flow samples of shape (num_pairs, num_samples, obs_dim).
+
+    Returns:
+        Dictionary with pointwise accuracy metrics.
+    """
+    flow_mean = np.mean(flow_samples, axis=1)  # (num_pairs, obs_dim)
+    errors = true_next_obs - flow_mean  # (num_pairs, obs_dim)
+
+    per_dim_mae = np.mean(np.abs(errors), axis=0)  # (obs_dim,)
+    per_dim_rmse = np.sqrt(np.mean(errors ** 2, axis=0))  # (obs_dim,)
+    per_pair_mse = np.mean(errors ** 2, axis=1)  # (num_pairs,)
+
+    return {
+        "pointwise_per_dim_mae": per_dim_mae,
+        "pointwise_per_dim_rmse": per_dim_rmse,
+        "pointwise_avg_mae": np.mean(per_dim_mae),
+        "pointwise_avg_rmse": np.mean(per_dim_rmse),
+        "pointwise_per_pair_mse": per_pair_mse,
+        "pointwise_flow_mean": flow_mean,
+        "pointwise_true": true_next_obs,
     }
 
 
@@ -69,38 +104,25 @@ def compare_statistics(empirical_samples, flow_samples):
     return results
 
 
-def compute_global_statistics(dataset):
-    """Compute global mean and std of next_observations across entire dataset.
+def compare_global_statistics(dataset_next_obs, flow_samples_all):
+    """Compare global (marginal) statistics: dataset s' vs flow-generated s'.
+
+    Given a set of (s, a) pairs sampled from the dataset, the flow model
+    generates s' for each. We compare the marginal distribution of these
+    generated s' against the dataset's marginal distribution of s'.
 
     Args:
-        dataset: Dataset dict with 'next_observations'.
-
-    Returns:
-        Dictionary with 'global_mean' and 'global_std'.
-    """
-    next_obs = dataset["next_observations"]
-    return {
-        "global_mean": np.mean(next_obs, axis=0),
-        "global_std": np.std(next_obs, axis=0),
-    }
-
-
-def compare_global_statistics(dataset, flow_samples_flat):
-    """Compare global statistics: all dataset s' vs all flow samples.
-
-    Args:
-        dataset: Dataset dict with 'next_observations' of shape (N, obs_dim).
-        flow_samples_flat: Flow samples of shape (M, obs_dim).
+        dataset_next_obs: All s' from dataset, shape (N, obs_dim).
+        flow_samples_all: Flow samples flattened, shape (M, obs_dim).
 
     Returns:
         Dictionary with global comparison results.
     """
-    ds_next = dataset["next_observations"]
-    ds_mean = np.mean(ds_next, axis=0)
-    ds_std = np.std(ds_next, axis=0)
+    ds_mean = np.mean(dataset_next_obs, axis=0)
+    ds_std = np.std(dataset_next_obs, axis=0)
 
-    flow_mean = np.mean(flow_samples_flat, axis=0)
-    flow_std = np.std(flow_samples_flat, axis=0)
+    flow_mean = np.mean(flow_samples_all, axis=0)
+    flow_std = np.std(flow_samples_all, axis=0)
 
     return {
         "dataset_global_mean": ds_mean,
@@ -113,14 +135,16 @@ def compare_global_statistics(dataset, flow_samples_flat):
     }
 
 
-def print_comparison_report(results, dim_names=None):
+def print_comparison_report(pointwise_results, neighbor_results, global_results, dim_names=None):
     """Print a formatted comparison report.
 
     Args:
-        results: Results dictionary from compare_statistics.
+        pointwise_results: Results from compute_pointwise_accuracy.
+        neighbor_results: Results from compare_statistics.
+        global_results: Results from compare_global_statistics.
         dim_names: Optional list of dimension names.
     """
-    obs_dim = len(results["avg_empirical_mean"])
+    obs_dim = len(pointwise_results["pointwise_per_dim_mae"])
     if dim_names is None:
         dim_names = [f"dim_{i}" for i in range(obs_dim)]
 
@@ -128,23 +152,48 @@ def print_comparison_report(results, dim_names=None):
     print("STATISTICAL COMPARISON: Dataset vs Flow Model")
     print("=" * 70)
 
-    # Mean comparison
+    # --- Pointwise prediction accuracy ---
+    print("\n--- 1. POINTWISE PREDICTION (flow mean vs true s') ---")
+    print(f"\n{'Dim':<8} {'MAE':>10} {'RMSE':>10}")
+    print("-" * 30)
+    for i in range(obs_dim):
+        print(f"{dim_names[i]:<8} {pointwise_results['pointwise_per_dim_mae'][i]:>10.4f} "
+              f"{pointwise_results['pointwise_per_dim_rmse'][i]:>10.4f}")
+    print(f"\nAvg MAE: {pointwise_results['pointwise_avg_mae']:.4f}")
+    print(f"Avg RMSE: {pointwise_results['pointwise_avg_rmse']:.4f}")
+
+    # --- Neighbor-based conditional comparison ---
+    print("\n--- 2. NEIGHBORHOOD (KNN) CONDITIONAL COMPARISON ---")
     print(f"\n{'Dim':<8} {'Emp Mean':>10} {'Flow Mean':>10} {'Abs Err':>10}")
     print("-" * 40)
     for i in range(obs_dim):
-        print(f"{dim_names[i]:<8} {results['avg_empirical_mean'][i]:>10.4f} "
-              f"{results['avg_flow_mean'][i]:>10.4f} {results['mean_abs_error'][i]:>10.4f}")
+        print(f"{dim_names[i]:<8} {neighbor_results['avg_empirical_mean'][i]:>10.4f} "
+              f"{neighbor_results['avg_flow_mean'][i]:>10.4f} "
+              f"{neighbor_results['mean_abs_error'][i]:>10.4f}")
 
-    # Std comparison
     print(f"\n{'Dim':<8} {'Emp Std':>10} {'Flow Std':>10} {'Ratio':>10}")
     print("-" * 40)
     for i in range(obs_dim):
-        print(f"{dim_names[i]:<8} {results['avg_empirical_std'][i]:>10.4f} "
-              f"{results['avg_flow_std'][i]:>10.4f} {results['std_ratio'][i]:>10.4f}")
+        print(f"{dim_names[i]:<8} {neighbor_results['avg_empirical_std'][i]:>10.4f} "
+              f"{neighbor_results['avg_flow_std'][i]:>10.4f} "
+              f"{neighbor_results['std_ratio'][i]:>10.4f}")
 
-    # Summary
-    print(f"\nOverall Mean Abs Error: {np.mean(results['mean_abs_error']):.4f}")
-    print(f"Overall Std Ratio (avg): {np.mean(results['std_ratio']):.4f} (ideal: 1.0)")
+    print(f"\nOverall Neighbor Mean Abs Error: {np.mean(neighbor_results['mean_abs_error']):.4f}")
+    print(f"Overall Neighbor Std Ratio (avg): {np.mean(neighbor_results['std_ratio']):.4f} (ideal: 1.0)")
+
+    # --- Global marginal comparison ---
+    print("\n--- 3. GLOBAL MARGINAL COMPARISON ---")
+    print(f"\n{'Dim':<8} {'DS Mean':>10} {'Flow Mean':>10} {'DS Std':>10} {'Flow Std':>10} {'Std Ratio':>10}")
+    print("-" * 60)
+    for i in range(obs_dim):
+        print(f"{dim_names[i]:<8} {global_results['dataset_global_mean'][i]:>10.4f} "
+              f"{global_results['flow_global_mean'][i]:>10.4f} "
+              f"{global_results['dataset_global_std'][i]:>10.4f} "
+              f"{global_results['flow_global_std'][i]:>10.4f} "
+              f"{global_results['global_std_ratio'][i]:>10.4f}")
+
+    print(f"\nGlobal Mean Abs Error (avg): {np.mean(global_results['global_mean_abs_error']):.4f}")
+    print(f"Global Std Ratio (avg): {np.mean(global_results['global_std_ratio']):.4f} (ideal: 1.0)")
     print("=" * 70)
 
 
